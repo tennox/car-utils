@@ -33,7 +33,7 @@ pub fn pack_files<T>(
     path: impl AsRef<Path>,
     to_carfile: T,
     hasher_codec: multicodec::Codec,
-    no_wrap_file: bool,
+    no_wrap_path: bool,
 ) -> Result<Cid, CarError>
 where
     T: std::io::Write + std::io::Seek,
@@ -52,7 +52,7 @@ where
         let mut file = fs::OpenOptions::new().read(true).open(&src_path)?;
         let file_size = file.metadata()?.len() as usize;
         let (hash, size) = process_file(&mut file, &mut writer, file_size, hasher_codec)?;
-        if no_wrap_file {
+        if no_wrap_path {
             root_cid = hash;
         } else {
             // wrap file into a directory entry
@@ -88,30 +88,32 @@ where
                 hasher_codec,
             )?;
         }
-        // add an additional top node like in go-car
-        let root_node = path_cache.get(&src_path).unwrap();
-        let tsize: u64 = DagPbCodec
-            .encode(&root_node.encode()?)
-            .map_err(|e| CarError::Parsing(e.to_string()))?
-            .len() as u64
-            + root_node.links.iter().map(|link| link.tsize).sum::<u64>();
-        let unix_fs = UnixFs {
-            links: vec![Link {
-                hash: root_cid,
+        if !no_wrap_path {
+            // add an additional top node like in go-car
+            let root_node = path_cache.get(&src_path).unwrap();
+            let tsize: u64 = DagPbCodec
+                .encode(&root_node.encode()?)
+                .map_err(|e| CarError::Parsing(e.to_string()))?
+                .len() as u64
+                + root_node.links.iter().map(|link| link.tsize).sum::<u64>();
+            let unix_fs = UnixFs {
+                links: vec![Link {
+                    hash: root_cid,
+                    file_type: FileType::Directory,
+                    name: src_path.file_name().unwrap().to_str().unwrap().to_string(),
+                    tsize,
+                }],
                 file_type: FileType::Directory,
-                name: src_path.file_name().unwrap().to_str().unwrap().to_string(),
-                tsize,
-            }],
-            file_type: FileType::Directory,
-            file_size: None,
-            ..Default::default()
+                file_size: None,
+                ..Default::default()
+            };
+            let ipld = unix_fs.encode()?;
+            let bs = DagPbCodec
+                .encode(&ipld)
+                .map_err(|e| CarError::Parsing(e.to_string()))?;
+            root_cid = pb_cid(&bs, hasher_codec);
+            writer.write_block(root_cid, bs)?;
         };
-        let ipld = unix_fs.encode()?;
-        let bs = DagPbCodec
-            .encode(&ipld)
-            .map_err(|e| CarError::Parsing(e.to_string()))?;
-        root_cid = pb_cid(&bs, hasher_codec);
-        writer.write_block(root_cid, bs)?;
     }
     let header = CarHeader::V1(CarHeaderV1::new(vec![root_cid]));
     writer.rewrite_header(header)?;
